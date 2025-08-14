@@ -29,6 +29,8 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_NAME: Brands
           USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-          MAX_PER_RUN: "300"   # на старте так устойчивее; потом можно вернуть 600
-          SLOW_MS: "1200"      # пауза между сайтами (мс); при блокировках поднять до 1500–1800
-        run: node main.mjs
+          MAX_PER_RUN: "300"    # на старте устойчивее; потом можно вернуть 600
+          SLOW_MS: "900"        # пауза между сайтами (мс): 800–1500
+          BATCH_PER_PROXY: "60" # сколько брендов обрабатывать на один прокси/сеанс
+          PROXIES: ${{ vars.PROXIES }} # необязательно: comma-separated, напр. http://1.2.3.4:8080,http://user:pass@5.6.7.8:8000
+        run: node src/main.mjs
