@@ -3,7 +3,7 @@ name: Brand Presence Check
 on:
   workflow_dispatch: {}
   schedule:
-    # каждые 2 дня в 06:00 UTC
+    # каждые 2 дня в 06:00 UTC (≈ 08:00 по Берлину летом)
     - cron: "0 6 */2 * *"
 
 jobs:
@@ -29,7 +29,6 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_NAME: Brands
           USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-          MAX_PER_RUN: "600"   # можно уменьшить, напр. 300
-          SLOW_MS: "600"       # пауза между сайтами (мс) — увеличьте до 1000–1500, если ловите блокировки
+          MAX_PER_RUN: "300"   # на старте так устойчивее; потом можно вернуть 600
+          SLOW_MS: "1200"      # пауза между сайтами (мс); при блокировках поднять до 1500–1800
         run: node main.mjs
-
