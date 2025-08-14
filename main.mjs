@@ -5,12 +5,14 @@ import { google } from "googleapis";
 
 puppeteer.use(StealthPlugin());
 
+/* ========= ENV ========= */
 const SHEET_ID   = process.env.SHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || "Brands";
-const MAX_PER_RUN = Number(process.env.MAX_PER_RUN || 600);
+const MAX_PER_RUN = Number(process.env.MAX_PER_RUN || 300);
 const USER_AGENT = process.env.USER_AGENT || "Mozilla/5.0";
-const SLOW_MS    = Number(process.env.SLOW_MS || 1000);
+const SLOW_MS    = Number(process.env.SLOW_MS || 1200);
 
+/* ========= Sheets auth ========= */
 function sheetsClientFromEnv() {
   if (!process.env.GOOGLE_CREDENTIALS) {
     throw new Error("Secret GOOGLE_CREDENTIALS is missing. Добавь JSON сервисного аккаунта в Settings → Secrets → Actions.");
@@ -21,31 +23,8 @@ function sheetsClientFromEnv() {
   return { sheets: google.sheets({ version: "v4", auth }), clientEmail: creds.client_email };
 }
 
+/* ========= Helpers ========= */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function preflight(sheets, clientEmail) {
-  if (!SHEET_ID) throw new Error("SHEET_ID is not set. Добавь секрет SHEET_ID в репозиторий.");
-  try {
-    await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A2:A` });
-  } catch (e) {
-    const msg = String(e);
-    if (msg.includes("The caller does not have permission")) {
-      throw new Error(`Нет прав на таблицу. Открой Google Sheet → “Поделиться” → добавь ${clientEmail} как Редактор.`);
-    }
-    if (msg.includes("Requested entity was not found")) {
-      throw new Error("Неверный SHEET_ID или лист SHEET_NAME. Проверь ID и имя листа (по умолчанию 'Brands').");
-    }
-    throw e;
-  }
-  const ts = new Date().toISOString();
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!E2`,
-    valueInputOption: "RAW",
-    requestBody: { values: [[ts]] }
-  });
-  console.log(`Preflight OK: можем читать и писать в лист "${SHEET_NAME}".`);
-}
 
 async function getBrands(sheets) {
   const res = await sheets.spreadsheets.values.get({
@@ -68,13 +47,70 @@ async function writeResultsBatch(sheets, results) {
   });
 }
 
+// плавная прокрутка, чтобы догрузился список
+async function autoScroll(page, maxMs = 4000) {
+  const start = Date.now();
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let total = 0;
+      const step = 500;
+      const timer = setInterval(() => {
+        const root = document.scrollingElement || document.documentElement;
+        const sh = root.scrollHeight;
+        window.scrollBy(0, step);
+        total += step;
+        if (total >= sh - window.innerHeight - 50) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 100);
+    });
+  });
+  while (Date.now() - start < maxMs) {
+    await page.waitForTimeout(200);
+  }
+}
+
+// закрыть типовые баннеры cookie/гео
+async function dismissBanners(page) {
+  const selectors = [
+    'button[aria-label="Принять"]',
+    'button:has-text("Принять")',
+    'button:has-text("Согласен")',
+    'button:has-text("I agree")',
+    '[data-testid="cookies-popup"] button',
+    '[data-auto="region-confirm-button"]',
+  ];
+  for (const s of selectors) {
+    try {
+      const el = await page.$(s);
+      if (el) { await el.click({ delay: 50 }); await page.waitForTimeout(200); }
+    } catch {}
+  }
+}
+
+// общая подготовка страницы
+async function setupPage(page) {
+  await page.setUserAgent(USER_AGENT);
+  await page.setExtraHTTPHeaders({ "Accept-Language": "ru-RU,ru;q=0.9" });
+  await page.emulateTimezone("Europe/Moscow"); // ближе к целевому рынку
+  await page.setViewport({ width: 1366, height: 900 });
+}
+
+/* ========= Checks ========= */
+
+// Wildberries
 async function hasWB(page, brand) {
   const q = encodeURIComponent(brand);
   const url = `https://www.wildberries.ru/catalog/0/search.aspx?search=${q}`;
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await page.waitForTimeout(1200);
-    const stateFound = await page.evaluate(() => {
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+    await dismissBanners(page);
+    await page.waitForTimeout(800);
+    await autoScroll(page, 2500);
+
+    // 1) preloaded state
+    const count = await page.evaluate(() => {
       try {
         const script = [...document.querySelectorAll("script")].find(s => s.textContent && s.textContent.includes("window.__PRELOADED_STATE__"));
         if (!script) return null;
@@ -85,32 +121,38 @@ async function hasWB(page, brand) {
         const end = cut.indexOf(";</");
         const jsonStr = (end === -1 ? cut : cut.slice(0, end)).trim();
         const data = JSON.parse(jsonStr);
-        const products =
-          data?.products?.items ||
-          data?.search?.products ||
-          data?.catalog?.products || [];
-        if (Array.isArray(products) && products.length > 0) return true;
-        return false;
+        const products = data?.products?.items || data?.search?.products || data?.catalog?.products || [];
+        return Array.isArray(products) ? products.length : null;
       } catch { return null; }
     });
-    if (stateFound === true) return true;
-    if (stateFound === false) return false;
+    if (typeof count === "number") return count > 0;
+
+    // 2) карточки в DOM
     const hasCards = await page.$(".product-card, .product-card__wrapper, [data-card-index]") !== null;
-    return !!hasCards;
+    if (hasCards) return true;
+
+    // 3) явное "ничего не найдено"
+    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
+    return !nothing ? false : false;
   } catch {
     return false;
   }
 }
 
+// Ozon
 async function hasOzon(page, brand) {
   const q = encodeURIComponent(brand);
   const url = `https://www.ozon.ru/search/?text=${q}`;
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await page.waitForTimeout(1500);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+    await dismissBanners(page);
+    await page.waitForTimeout(1000);
+    await autoScroll(page, 2500);
+
+    // 1) __PAGE_STATE__
     const found = await page.evaluate(() => {
       try {
-        const el = document.querySelector('#__PAGE_STATE__');
+        const el = document.querySelector("#__PAGE_STATE__");
         if (!el) return null;
         const st = JSON.parse(el.textContent || "{}");
         const ws = st?.widgetStates || {};
@@ -124,20 +166,36 @@ async function hasOzon(page, brand) {
       } catch { return null; }
     });
     if (found === true) return true;
-    if (found === false) return false;
-    const hasCards = await page.$('[data-widget="searchResultsV2"], [data-widget="searchResults"]') !== null;
-    return !!hasCards;
+    if (found === false) {
+      // иногда state пустой, но карточки есть
+    }
+
+    // 2) контейнеры/карточки
+    const hasResults = await page.$('[data-widget="searchResultsV2"], [data-widget="searchResults"]') !== null;
+    if (hasResults) {
+      const itemsCount = await page.$$eval('[data-widget="searchResultsV2"] a, [data-widget="searchResults"] a', els => els.length);
+      if (itemsCount > 0) return true;
+    }
+
+    // 3) явное отсутствие
+    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
+    return !nothing ? false : false;
   } catch {
     return false;
   }
 }
 
+// Яндекс Маркет (фикс региона Москва lr=213)
 async function hasYandexMarket(page, brand) {
   const q = encodeURIComponent(brand);
-  const url = `https://market.yandex.ru/search?text=${q}`;
+  const url = `https://market.yandex.ru/search?text=${q}&lr=213`;
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await page.waitForTimeout(1800);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+    await dismissBanners(page);
+    await page.waitForTimeout(1200);
+    await autoScroll(page, 3000);
+
+    // 1) основная зона + карточки
     const hasZone = await page.$('[data-zone-name="SearchResults"]') !== null;
     if (hasZone) {
       const hasItems = await page.$$eval(
@@ -146,18 +204,52 @@ async function hasYandexMarket(page, brand) {
       );
       if (hasItems) return true;
     }
-    const text = await page.evaluate(() => document.body.innerText || "");
-    if (/ничего не нашлось/i.test(text)) return false;
-    const anyLinks = await page.$$eval('a[href*="market.yandex.ru"]', els => els.length > 0);
-    return !!anyLinks;
+
+    // 2) счётчик результатов (если есть)
+    const hasCounter = await page.evaluate(() => {
+      const txt = document.body.innerText || "";
+      const m = txt.match(/Найдено\s+(\d[\d\s]*)\s+товар/i);
+      if (!m) return null;
+      const n = parseInt(m[1].replace(/\s+/g, ""), 10);
+      return Number.isFinite(n) ? n > 0 : null;
+    });
+    if (hasCounter === true) return true;
+
+    // 3) явное "ничего не нашлось"
+    const nothing = await page.evaluate(() => /ничего не нашлось/i.test(document.body.innerText || ""));
+    return !nothing ? false : false;
   } catch {
     return false;
   }
 }
 
+/* ========= Main ========= */
 (async () => {
+  if (!SHEET_ID) throw new Error("SHEET_ID is not set. Добавь секрет SHEET_ID.");
   const { sheets, clientEmail } = sheetsClientFromEnv();
-  await preflight(sheets, clientEmail);
+
+  // preflight: права/доступ
+  try {
+    await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A2:A` });
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("The caller does not have permission")) {
+      throw new Error(`Нет прав на таблицу. Поделитесь таблицей с ${clientEmail} (Editor).`);
+    }
+    if (msg.includes("Requested entity was not found")) {
+      throw new Error("Неверный SHEET_ID или имя листа (SHEET_NAME).");
+    }
+    throw e;
+  }
+
+  // тестовая запись времени в E2 — заодно проверка записи
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${SHEET_NAME}!E2`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[new Date().toISOString()]] }
+  });
+  console.log(`Preflight OK: лист "${SHEET_NAME}" доступен для чтения/записи.`);
 
   const brands = await getBrands(sheets);
   if (!brands.length) {
@@ -174,8 +266,7 @@ async function hasYandexMarket(page, brand) {
     ]
   });
   const page = await browser.newPage();
-  await page.setUserAgent(USER_AGENT);
-  await page.setViewport({ width: 1366, height: 900 });
+  await setupPage(page);
 
   const total = Math.min(brands.length, MAX_PER_RUN);
   const out = [];
