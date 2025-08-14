@@ -31,5 +31,5 @@ jobs:
           USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
           MAX_PER_RUN: "600"   # можно уменьшить, напр. 300
           SLOW_MS: "600"       # пауза между сайтами (мс) — увеличьте до 1000–1500, если ловите блокировки
-        run: node src/check.js
+        run: node src/check2.js
 
