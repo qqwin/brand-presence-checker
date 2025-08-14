@@ -1,4 +1,4 @@
-src/check.jsimport process from "node:process";
+import process from "node:process";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { google } from "googleapis";
