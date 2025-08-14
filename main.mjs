@@ -15,7 +15,7 @@ const SLOW_MS    = Number(process.env.SLOW_MS || 1200);
 /* ========= Sheets auth ========= */
 function sheetsClientFromEnv() {
   if (!process.env.GOOGLE_CREDENTIALS) {
-    throw new Error("Secret GOOGLE_CREDENTIALS is missing. Добавь JSON сервисного аккаунта в Settings → Secrets → Actions.");
+    throw new Error("Secret GOOGLE_CREDENTIALS is missing. Добавь JSON сервисного аккаунта (Secrets → Actions).");
   }
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const scopes = ["https://www.googleapis.com/auth/spreadsheets"];
@@ -97,6 +97,36 @@ async function setupPage(page) {
   await page.setViewport({ width: 1366, height: 900 });
 }
 
+/* ========= DuckDuckGo fallback ========= */
+/**
+ * Проверка через DuckDuckGo (без API):
+ * Ищем "site:<domain> <brandVariant>" и считаем "да", если есть результат.
+ * Работает почти откуда угодно, не требует ключей, держит большой объём.
+ */
+async function hasViaDDG(page, domain, brandVariant) {
+  const q = encodeURIComponent(`site:${domain} ${brandVariant}`);
+  const url = `https://duckduckgo.com/html/?q=${q}`;
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+    await page.waitForTimeout(800);
+    // Результаты находятся в .results или .result__a
+    const found = await page.$$eval(".result, .result__a", els => els.length > 0);
+    return !!found;
+  } catch {
+    return false;
+  }
+}
+
+/* ========= Brand variants ========= */
+function brandVariants(brand) {
+  const b = brand.trim();
+  const set = new Set([b, b.toUpperCase(), b.toLowerCase()]);
+  // лёгкие подстановки: дефисы/пробелы
+  set.add(b.replace(/\s+/g, "-"));
+  set.add(b.replace(/-/g, " "));
+  return Array.from(set);
+}
+
 /* ========= Checks ========= */
 
 // Wildberries
@@ -127,14 +157,25 @@ async function hasWB(page, brand) {
     });
     if (typeof count === "number") return count > 0;
 
-    // 2) карточки в DOM
+    // 2) карточки
     const hasCards = await page.$(".product-card, .product-card__wrapper, [data-card-index]") !== null;
     if (hasCards) return true;
 
-    // 3) явное "ничего не найдено"
+    // 3) fallback DuckDuckGo
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "wildberries.ru", v);
+      if (ok) return true;
+    }
+
+    // 4) явное "ничего не найдено"
     const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
     return !nothing ? false : false;
   } catch {
+    // прямой заход не удался — пробуем только DDG
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "wildberries.ru", v);
+      if (ok) return true;
+    }
     return false;
   }
 }
@@ -166,9 +207,6 @@ async function hasOzon(page, brand) {
       } catch { return null; }
     });
     if (found === true) return true;
-    if (found === false) {
-      // иногда state пустой, но карточки есть
-    }
 
     // 2) контейнеры/карточки
     const hasResults = await page.$('[data-widget="searchResultsV2"], [data-widget="searchResults"]') !== null;
@@ -177,10 +215,20 @@ async function hasOzon(page, brand) {
       if (itemsCount > 0) return true;
     }
 
-    // 3) явное отсутствие
+    // 3) fallback DuckDuckGo
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "ozon.ru", v);
+      if (ok) return true;
+    }
+
+    // 4) явное отсутствие (не критично)
     const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
     return !nothing ? false : false;
   } catch {
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "ozon.ru", v);
+      if (ok) return true;
+    }
     return false;
   }
 }
@@ -195,7 +243,7 @@ async function hasYandexMarket(page, brand) {
     await page.waitForTimeout(1200);
     await autoScroll(page, 3000);
 
-    // 1) основная зона + карточки
+    // 1) зона + карточки
     const hasZone = await page.$('[data-zone-name="SearchResults"]') !== null;
     if (hasZone) {
       const hasItems = await page.$$eval(
@@ -205,7 +253,7 @@ async function hasYandexMarket(page, brand) {
       if (hasItems) return true;
     }
 
-    // 2) счётчик результатов (если есть)
+    // 2) счётчик (если есть)
     const hasCounter = await page.evaluate(() => {
       const txt = document.body.innerText || "";
       const m = txt.match(/Найдено\s+(\d[\d\s]*)\s+товар/i);
@@ -215,10 +263,20 @@ async function hasYandexMarket(page, brand) {
     });
     if (hasCounter === true) return true;
 
-    // 3) явное "ничего не нашлось"
+    // 3) fallback DuckDuckGo
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "market.yandex.ru", v);
+      if (ok) return true;
+    }
+
+    // 4) явное "ничего не нашлось"
     const nothing = await page.evaluate(() => /ничего не нашлось/i.test(document.body.innerText || ""));
     return !nothing ? false : false;
   } catch {
+    for (const v of brandVariants(brand)) {
+      const ok = await hasViaDDG(page, "market.yandex.ru", v);
+      if (ok) return true;
+    }
     return false;
   }
 }
@@ -242,7 +300,7 @@ async function hasYandexMarket(page, brand) {
     throw e;
   }
 
-  // тестовая запись времени в E2 — заодно проверка записи
+  // тестовая запись времени в E2 — проверка записи
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!E2`,
