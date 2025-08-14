@@ -97,24 +97,43 @@ async function setupPage(page) {
   await page.setViewport({ width: 1366, height: 900 });
 }
 
-/* ========= DuckDuckGo fallback ========= */
+/* ========= DuckDuckGo fallback (укреплённый) ========= */
 /**
- * Проверка через DuckDuckGo (без API):
- * Ищем "site:<domain> <brandVariant>" и считаем "да", если есть результат.
- * Работает почти откуда угодно, не требует ключей, держит большой объём.
+ * Идея: проверяем `site:<domain> <brandVariant>` на DDG.
+ * Пробуем два эндпоинта: /html/ и /lite/.
+ * Успех = есть <a> с href, содержащим домен, ИЛИ домен встречается в исходнике страницы.
  */
 async function hasViaDDG(page, domain, brandVariant) {
-  const q = encodeURIComponent(`site:${domain} ${brandVariant}`);
-  const url = `https://duckduckgo.com/html/?q=${q}`;
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await page.waitForTimeout(800);
-    // Результаты находятся в .results или .result__a
-    const found = await page.$$eval(".result, .result__a", els => els.length > 0);
-    return !!found;
-  } catch {
-    return false;
+  const queries = [
+    `site:${domain} ${brandVariant}`,
+    `site:${domain} "${brandVariant}"`,
+  ];
+
+  const endpoints = [
+    (q) => `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+    (q) => `https://duckduckgo.com/lite/?q=${encodeURIComponent(q)}`
+  ];
+
+  for (const q of queries) {
+    for (const makeUrl of endpoints) {
+      const url = makeUrl(q);
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+        await page.waitForTimeout(800);
+
+        // 1) Ищем любые ссылки на нужный домен
+        const hasLink = await page.$$eval(`a[href*="${domain}"]`, els => els.length > 0);
+        if (hasLink) return true;
+
+        // 2) На крайний случай — ищем совпадение домена в HTML
+        const html = await page.content();
+        if (html.includes(domain)) return true;
+      } catch {
+        // пробуем следующий эндпоинт или следующий вариант запроса
+      }
+    }
   }
+  return false;
 }
 
 /* ========= Brand variants ========= */
@@ -160,22 +179,21 @@ async function hasWB(page, brand) {
     // 2) карточки
     const hasCards = await page.$(".product-card, .product-card__wrapper, [data-card-index]") !== null;
     if (hasCards) return true;
+  } catch {
+    // игнор — уйдём на фолбэк
+  }
 
-    // 3) fallback DuckDuckGo
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "wildberries.ru", v);
-      if (ok) return true;
-    }
+  // 3) fallback DuckDuckGo
+  for (const v of brandVariants(brand)) {
+    const ok = await hasViaDDG(page, "wildberries.ru", v);
+    if (ok) return true;
+  }
 
-    // 4) явное "ничего не найдено"
-    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
+  // 4) явное "ничего не найдено"
+  try {
+    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body?.innerText || ""));
     return !nothing ? false : false;
   } catch {
-    // прямой заход не удался — пробуем только DDG
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "wildberries.ru", v);
-      if (ok) return true;
-    }
     return false;
   }
 }
@@ -211,24 +229,27 @@ async function hasOzon(page, brand) {
     // 2) контейнеры/карточки
     const hasResults = await page.$('[data-widget="searchResultsV2"], [data-widget="searchResults"]') !== null;
     if (hasResults) {
-      const itemsCount = await page.$$eval('[data-widget="searchResultsV2"] a, [data-widget="searchResults"] a', els => els.length);
+      const itemsCount = await page.$$eval(
+        '[data-widget="searchResultsV2"] a, [data-widget="searchResults"] a',
+        els => els.length
+      );
       if (itemsCount > 0) return true;
     }
+  } catch {
+    // игнор — уйдём на фолбэк
+  }
 
-    // 3) fallback DuckDuckGo
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "ozon.ru", v);
-      if (ok) return true;
-    }
+  // 3) fallback DuckDuckGo
+  for (const v of brandVariants(brand)) {
+    const ok = await hasViaDDG(page, "ozon.ru", v);
+    if (ok) return true;
+  }
 
-    // 4) явное отсутствие (не критично)
-    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body.innerText || ""));
+  // 4) явное отсутствие (не критично)
+  try {
+    const nothing = await page.evaluate(() => /ничего не найдено/i.test(document.body?.innerText || ""));
     return !nothing ? false : false;
   } catch {
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "ozon.ru", v);
-      if (ok) return true;
-    }
     return false;
   }
 }
@@ -255,28 +276,28 @@ async function hasYandexMarket(page, brand) {
 
     // 2) счётчик (если есть)
     const hasCounter = await page.evaluate(() => {
-      const txt = document.body.innerText || "";
+      const txt = document.body?.innerText || "";
       const m = txt.match(/Найдено\s+(\d[\d\s]*)\s+товар/i);
       if (!m) return null;
       const n = parseInt(m[1].replace(/\s+/g, ""), 10);
       return Number.isFinite(n) ? n > 0 : null;
     });
     if (hasCounter === true) return true;
+  } catch {
+    // игнор — уйдём на фолбэк
+  }
 
-    // 3) fallback DuckDuckGo
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "market.yandex.ru", v);
-      if (ok) return true;
-    }
+  // 3) fallback DuckDuckGo
+  for (const v of brandVariants(brand)) {
+    const ok = await hasViaDDG(page, "market.yandex.ru", v);
+    if (ok) return true;
+  }
 
-    // 4) явное "ничего не нашлось"
-    const nothing = await page.evaluate(() => /ничего не нашлось/i.test(document.body.innerText || ""));
+  // 4) явное "ничего не нашлось"
+  try {
+    const nothing = await page.evaluate(() => /ничего не нашлось/i.test(document.body?.innerText || ""));
     return !nothing ? false : false;
   } catch {
-    for (const v of brandVariants(brand)) {
-      const ok = await hasViaDDG(page, "market.yandex.ru", v);
-      if (ok) return true;
-    }
     return false;
   }
 }
