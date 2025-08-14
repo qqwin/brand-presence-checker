@@ -1,0 +1,15 @@
+{
+  "name": "brand-presence-checker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/check.js"
+  },
+  "dependencies": {
+    "googleapis": "^133.0.0",
+    "puppeteer": "^23.3.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
